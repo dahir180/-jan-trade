@@ -1,4 +1,4 @@
-const CACHE_NAME = "jan-trade-v4-20260731-2";
+const CACHE_NAME = "jan-trade-v4-20260731-3";
 const CORE_ASSETS = [
   "./",
   "./index.html",

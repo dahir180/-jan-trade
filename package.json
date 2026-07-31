@@ -1,7 +1,7 @@
 {
   "name": "jan-trade-pro",
   "private": true,
-  "version": "4.1.0",
+  "version": "4.1.1",
   "type": "module",
   "scripts": {
     "test": "node --test tests/smoke.test.mjs"

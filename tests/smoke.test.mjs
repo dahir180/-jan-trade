@@ -150,6 +150,31 @@ test("fresh boot exposes the full configurable PWA", async () => {
   dom.window.close();
 });
 
+test("common account sizes pass native validation and persist", async () => {
+  const dom = await launch();
+  const { window } = dom;
+  const { document } = window;
+  document.querySelector("#addAccountBtn").click();
+  input(window, "#accountName", "Alpha Capital 10K");
+  const balance = document.querySelector("#accountBalance");
+
+  for (const value of [10000, 25000, 50000, 100000, 12345.67]) {
+    input(window, "#accountBalance", value);
+    assert.equal(balance.validity.stepMismatch, false, `${value} is a valid size`);
+    assert.equal(balance.checkValidity(), true, `${value} passes validation`);
+  }
+
+  input(window, "#accountBalance", 10000);
+  assert.equal(document.querySelector("#accountForm").checkValidity(), true);
+  await submit(window, "#accountForm");
+  const account = storedState(window).accounts.find(
+    (item) => item.name === "Alpha Capital 10K",
+  );
+  assert.ok(account);
+  assert.equal(account.balance, 10000);
+  dom.window.close();
+});
+
 test("percentage copy groups preserve proportional risk and return", async () => {
   const dom = await launch();
   const { window } = dom;
