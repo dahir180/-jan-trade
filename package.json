@@ -1,0 +1,13 @@
+{
+  "name": "jan-trade-pro",
+  "private": true,
+  "version": "4.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/smoke.test.mjs"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.4",
+    "jsdom": "^26.1.0"
+  }
+}
