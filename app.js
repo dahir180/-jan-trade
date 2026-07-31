@@ -599,6 +599,7 @@
   let storageMode = "IndexedDB";
   let lastDeletedTrade = null;
   let serviceWorkerRegistration = null;
+  let pendingMt5Import = null;
 
   function openDatabase() {
     return new Promise((resolve, reject) => {
@@ -2662,10 +2663,13 @@
   }
 
   function collectTrade(account, overrides = {}) {
+    const existing = state.trades.find(
+      (trade) => trade.id === $("#tradeId").value,
+    );
     const draft = {
       id: $("#tradeId").value || uid(),
-      batchId: overrides.batchId || "",
-      copiedFrom: overrides.copiedFrom || "",
+      batchId: overrides.batchId ?? existing?.batchId ?? "",
+      copiedFrom: overrides.copiedFrom ?? existing?.copiedFrom ?? "",
       accountId: overrides.accountId || account.id,
       date: $("#tradeDate").value,
       closeDate: $("#tradeCloseDate").value,
@@ -2693,10 +2697,8 @@
       screenshot: currentImage,
       maeR: $("#maeR").value === "" ? null : asNumber($("#maeR").value),
       mfeR: $("#mfeR").value === "" ? null : asNumber($("#mfeR").value),
-      externalId: "",
-      createdAt:
-        state.trades.find((trade) => trade.id === $("#tradeId").value)
-          ?.createdAt || new Date().toISOString(),
+      externalId: overrides.externalId ?? existing?.externalId ?? "",
+      createdAt: existing?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       ...overrides,
     };
@@ -3099,6 +3101,1108 @@
     return Number.isFinite(new Date(normalized).getTime()) ? normalized : "";
   }
 
+  const MT5_HEADER_ALIASES = Object.freeze({
+    time: ["time", "date", "وقت", "التاريخ"],
+    openTime: [
+      "open time",
+      "opening time",
+      "entry time",
+      "وقت الفتح",
+      "وقت الدخول",
+      "تاريخ الفتح",
+    ],
+    closeTime: [
+      "close time",
+      "closing time",
+      "exit time",
+      "وقت الإغلاق",
+      "وقت الخروج",
+      "تاريخ الإغلاق",
+    ],
+    deal: ["deal", "deal id", "ticket", "صفقة", "رقم الصفقة", "تذكرة"],
+    position: [
+      "position",
+      "position id",
+      "positionid",
+      "المركز",
+      "رقم المركز",
+    ],
+    order: ["order", "order id", "أمر", "رقم الأمر"],
+    symbol: ["symbol", "instrument", "pair", "الرمز", "الأصل", "الأداة"],
+    type: ["type", "side", "النوع"],
+    direction: ["direction", "entry", "الاتجاه", "الدخول"],
+    volume: ["volume", "lots", "lot", "size", "الحجم", "اللوت"],
+    price: ["price", "السعر"],
+    openPrice: [
+      "open price",
+      "entry price",
+      "سعر الفتح",
+      "سعر الدخول",
+    ],
+    closePrice: [
+      "close price",
+      "exit price",
+      "سعر الإغلاق",
+      "سعر الخروج",
+    ],
+    sl: ["s/l", "sl", "stop loss", "stoploss", "وقف الخسارة"],
+    tp: ["t/p", "tp", "take profit", "takeprofit", "جني الربح"],
+    commission: ["commission", "comm", "العمولة", "العمولات"],
+    fee: ["fee", "fees", "الرسوم", "رسم"],
+    swap: ["swap", "swaps", "التبييت", "السواب"],
+    profit: [
+      "profit",
+      "p/l",
+      "p&l",
+      "net profit",
+      "الربح",
+      "الربح والخسارة",
+      "النتيجة",
+    ],
+    balance: ["balance", "الرصيد"],
+    comment: ["comment", "comments", "تعليق", "الملاحظات"],
+    state: ["state", "status", "الحالة"],
+  });
+
+  const MT5_SECTION_ALIASES = Object.freeze({
+    deals: ["deals", "deal history", "الصفقات", "سجل الصفقات", "العمليات"],
+    positions: [
+      "positions",
+      "closed positions",
+      "position history",
+      "المراكز",
+      "المراكز المغلقة",
+      "سجل المراكز",
+    ],
+    orders: ["orders", "order history", "الأوامر", "سجل الأوامر"],
+    working: ["working orders", "active orders", "الأوامر النشطة"],
+  });
+
+  function normalizeMt5Text(value) {
+    return String(value || "")
+      .normalize("NFKC")
+      .replace(/\u00a0/g, " ")
+      .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+      .replace(/[\u064b-\u065f\u0670]/g, "")
+      .trim()
+      .toLowerCase()
+      .replace(/[&+]/g, "and")
+      .replace(/[\s_.:/\\()[\]{}#%-]+/g, "");
+  }
+
+  const mt5HeaderLookup = new Map(
+    Object.entries(MT5_HEADER_ALIASES).flatMap(([field, aliases]) =>
+      aliases.map((alias) => [normalizeMt5Text(alias), field]),
+    ),
+  );
+
+  const mt5SectionLookup = new Map(
+    Object.entries(MT5_SECTION_ALIASES).flatMap(([section, aliases]) =>
+      aliases.map((alias) => [normalizeMt5Text(alias), section]),
+    ),
+  );
+
+  function mt5HeaderName(value) {
+    return mt5HeaderLookup.get(normalizeMt5Text(value)) || "";
+  }
+
+  function mt5SectionName(value) {
+    const normalized = normalizeMt5Text(value);
+    if (mt5SectionLookup.has(normalized)) return mt5SectionLookup.get(normalized);
+    for (const [alias, section] of mt5SectionLookup) {
+      if (normalized.startsWith(alias) && normalized.length <= alias.length + 12) {
+        return section;
+      }
+    }
+    return "";
+  }
+
+  function asciiDigits(value) {
+    const arabic = "٠١٢٣٤٥٦٧٨٩";
+    const eastern = "۰۱۲۳۴۵۶۷۸۹";
+    return String(value || "")
+      .replace(/[٠-٩]/g, (digit) => arabic.indexOf(digit))
+      .replace(/[۰-۹]/g, (digit) => eastern.indexOf(digit));
+  }
+
+  function mt5Number(value, fallback = 0) {
+    let raw = asciiDigits(value)
+      .replace(/\u00a0/g, "")
+      .replace(/[−–—]/g, "-")
+      .replace(/٬/g, ",")
+      .replace(/٫/g, ".")
+      .trim();
+    if (!raw) return fallback;
+    const parenthesized = /^\(.*\)$/.test(raw);
+    raw = raw
+      .replace(/[()]/g, "")
+      .replace(/[^\d.,+\-]/g, "");
+    if (!raw || !/\d/.test(raw)) return fallback;
+
+    const lastComma = raw.lastIndexOf(",");
+    const lastDot = raw.lastIndexOf(".");
+    if (lastComma >= 0 && lastDot >= 0) {
+      const decimal = lastComma > lastDot ? "," : ".";
+      const thousands = decimal === "," ? /\./g : /,/g;
+      raw = raw.replace(thousands, "");
+      if (decimal === ",") raw = raw.replace(",", ".");
+    } else if (lastComma >= 0) {
+      raw = raw.replace(/,/g, (match, offset) =>
+        offset === lastComma ? "." : "",
+      );
+    } else if ((raw.match(/\./g) || []).length > 1) {
+      raw = raw.replace(/\./g, (match, offset) =>
+        offset === lastDot ? "." : "",
+      );
+    }
+
+    const number = Number(raw);
+    if (!Number.isFinite(number)) return fallback;
+    return parenthesized ? -Math.abs(number) : number;
+  }
+
+  function mt5Volume(value) {
+    const first = String(value || "").split(/[\/|]/)[0];
+    return Math.abs(mt5Number(first));
+  }
+
+  function mt5TradeType(value) {
+    const normalized = normalizeMt5Text(value);
+    if (
+      normalized.includes("cancel") ||
+      normalized.includes("canceled") ||
+      normalized.includes("cancelled") ||
+      normalized.includes("ملغي") ||
+      normalized.includes("إلغاء")
+    ) {
+      return "";
+    }
+    if (
+      normalized.includes("buy") ||
+      normalized.includes("purchase") ||
+      normalized.includes("شراء")
+    ) {
+      return "buy";
+    }
+    if (normalized.includes("sell") || normalized.includes("بيع")) {
+      return "sell";
+    }
+    return "";
+  }
+
+  function mt5DealDirection(value) {
+    const normalized = normalizeMt5Text(value);
+    if (
+      normalized.includes("inout") ||
+      normalized.includes("outin") ||
+      normalized.includes("دخولخروج") ||
+      normalized.includes("خروجدخول")
+    ) {
+      return "inout";
+    }
+    if (normalized.includes("out") || normalized.includes("خروج")) return "out";
+    if (normalized === "in" || normalized.includes("دخول")) return "in";
+    return "";
+  }
+
+  function mt5ExitReason(comment) {
+    const normalized = normalizeMt5Text(comment);
+    if (
+      normalized.includes("stoploss") ||
+      normalized.startsWith("sl") ||
+      normalized.includes("وقفالخسارة")
+    ) {
+      return "sl";
+    }
+    if (
+      normalized.includes("takeprofit") ||
+      normalized.startsWith("tp") ||
+      normalized.includes("جنيالربح")
+    ) {
+      return "tp";
+    }
+    if (
+      normalized.includes("stopout") ||
+      normalized.includes("so") ||
+      normalized.includes("إيقافإجباري")
+    ) {
+      return "sl";
+    }
+    return "other";
+  }
+
+  function mt5ExpandedCells(row) {
+    const values = [];
+    for (const cell of row.cells || []) {
+      const value = String(cell.textContent || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      const span = Math.max(1, Math.trunc(asNumber(cell.colSpan, 1)));
+      values.push(value);
+      for (let index = 1; index < span; index += 1) values.push("");
+    }
+    return values;
+  }
+
+  function mt5HeaderInfo(cells, section = "") {
+    const fields = cells.map(mt5HeaderName);
+    const recognized = fields.filter(Boolean);
+    const has = (field) => fields.includes(field);
+    const timeCount = fields.filter((field) =>
+      ["time", "openTime", "closeTime"].includes(field),
+    ).length;
+    const priceCount = fields.filter((field) =>
+      ["price", "openPrice", "closePrice"].includes(field),
+    ).length;
+    const isHeader =
+      cells.length >= 5 &&
+      recognized.length >= 4 &&
+      has("symbol") &&
+      has("type") &&
+      (timeCount > 0 || has("position") || has("deal")) &&
+      (has("profit") || has("direction") || has("deal") || has("position"));
+    if (!isHeader) return null;
+
+    let kind = "";
+    if (has("deal") || has("direction") || section === "deals") {
+      kind = "deals";
+    } else if (
+      has("position") &&
+      (has("profit") ||
+        has("closeTime") ||
+        timeCount >= 2 ||
+        priceCount >= 2 ||
+        section === "positions")
+    ) {
+      kind = "positions";
+    }
+    return kind ? { fields, kind } : null;
+  }
+
+  function mt5FieldIndexes(header, names) {
+    const wanted = new Set(Array.isArray(names) ? names : [names]);
+    const indexes = [];
+    header.forEach((field, index) => {
+      if (wanted.has(field)) indexes.push(index);
+    });
+    return indexes;
+  }
+
+  function mt5Field(row, header, names, occurrence = 0) {
+    const index = mt5FieldIndexes(header, names)[occurrence];
+    return index == null ? "" : row[index] ?? "";
+  }
+
+  function mt5TimePair(row, header) {
+    const generic = mt5FieldIndexes(header, "time");
+    const openIndex =
+      mt5FieldIndexes(header, "openTime")[0] ?? generic[0] ?? null;
+    const closeIndex =
+      mt5FieldIndexes(header, "closeTime")[0] ?? generic[1] ?? null;
+    return {
+      open: normalizeImportedDate(
+        openIndex == null ? "" : asciiDigits(row[openIndex]),
+      ),
+      close: normalizeImportedDate(
+        closeIndex == null ? "" : asciiDigits(row[closeIndex]),
+      ),
+    };
+  }
+
+  function mt5PricePair(row, header) {
+    const generic = mt5FieldIndexes(header, "price");
+    const openIndex =
+      mt5FieldIndexes(header, "openPrice")[0] ?? generic[0] ?? null;
+    const closeIndex =
+      mt5FieldIndexes(header, "closePrice")[0] ?? generic[1] ?? null;
+    return {
+      open: openIndex == null ? null : mt5Number(row[openIndex], null),
+      close: closeIndex == null ? null : mt5Number(row[closeIndex], null),
+    };
+  }
+
+  function mt5RawFinancial(row, header) {
+    return {
+      profit: mt5Number(mt5Field(row, header, "profit")),
+      commission: mt5Number(mt5Field(row, header, "commission")),
+      fee: mt5Number(mt5Field(row, header, "fee")),
+      swap: mt5Number(mt5Field(row, header, "swap")),
+    };
+  }
+
+  function mt5FinancialParts(raw) {
+    const feeContribution = asNumber(raw.commission) + asNumber(raw.fee);
+    const feeCost = Math.max(0, -feeContribution);
+    const feeCredit = Math.max(0, feeContribution);
+    const swapCost = -(asNumber(raw.swap) + feeCredit);
+    return {
+      grossPnl: round(raw.profit, 2),
+      fees: round(feeCost, 2),
+      swap: round(swapCost, 2),
+      netPnl: round(
+        asNumber(raw.profit) + feeContribution + asNumber(raw.swap),
+        2,
+      ),
+    };
+  }
+
+  function applyMt5FeeConvention(records) {
+    const charges = records.flatMap((record) => [
+      asNumber(record.rawFinancial?.commission),
+      asNumber(record.rawFinancial?.fee),
+    ]);
+    const positiveCostConvention =
+      charges.some((value) => value > 0) &&
+      !charges.some((value) => value < 0);
+    for (const record of records) {
+      if (positiveCostConvention) {
+        record.rawFinancial.commission =
+          -Math.abs(record.rawFinancial.commission);
+        record.rawFinancial.fee = -Math.abs(record.rawFinancial.fee);
+      }
+      record.financial = mt5FinancialParts(record.rawFinancial);
+    }
+    return positiveCostConvention;
+  }
+
+  function parseMt5PositionRow(row, header) {
+    const times = mt5TimePair(row, header);
+    const prices = mt5PricePair(row, header);
+    const symbol = mt5Field(row, header, "symbol")
+      .trim()
+      .toUpperCase();
+    const type = mt5TradeType(mt5Field(row, header, "type"));
+    if (!times.open || !times.close || !symbol || !type) return null;
+    const positionId =
+      asciiDigits(mt5Field(row, header, ["position", "deal"])).trim() ||
+      `${symbol}-${times.open}-${prices.open ?? ""}`;
+    const comment = mt5Field(row, header, "comment").trim();
+    return {
+      positionKey: `position:${positionId}`,
+      positionId,
+      openTime: times.open,
+      closeTime: times.close,
+      symbol,
+      direction: type === "sell" ? "short" : "long",
+      size: mt5Volume(mt5Field(row, header, "volume")),
+      entry: prices.open,
+      exit: prices.close,
+      stop: mt5Number(mt5Field(row, header, "sl"), null),
+      target: mt5Number(mt5Field(row, header, "tp"), null),
+      comment,
+      exitReason: mt5ExitReason(comment),
+      rawFinancial: mt5RawFinancial(row, header),
+      inferred: false,
+    };
+  }
+
+  function parseMt5DealRow(row, header) {
+    const time = normalizeImportedDate(
+      asciiDigits(mt5Field(row, header, ["time", "openTime", "closeTime"])),
+    );
+    const symbol = mt5Field(row, header, "symbol")
+      .trim()
+      .toUpperCase();
+    const type = mt5TradeType(mt5Field(row, header, "type"));
+    const dealId = asciiDigits(mt5Field(row, header, "deal")).trim();
+    if (!time || !symbol || !type || !dealId) return null;
+    const rawFinancial = mt5RawFinancial(row, header);
+    let direction = mt5DealDirection(mt5Field(row, header, "direction"));
+    if (!direction) direction = rawFinancial.profit !== 0 ? "out" : "in";
+    return {
+      dealId,
+      orderId: asciiDigits(mt5Field(row, header, "order")).trim(),
+      positionId: asciiDigits(mt5Field(row, header, "position")).trim(),
+      time,
+      symbol,
+      type,
+      direction,
+      volume: mt5Volume(mt5Field(row, header, "volume")),
+      price: mt5Number(mt5Field(row, header, "price"), null),
+      stop: mt5Number(mt5Field(row, header, "sl"), null),
+      target: mt5Number(mt5Field(row, header, "tp"), null),
+      comment: mt5Field(row, header, "comment").trim(),
+      rawFinancial,
+    };
+  }
+
+  function weightedMt5Average(records, field, volumeField = "volume") {
+    const valid = records.filter(
+      (record) =>
+        Number.isFinite(Number(record[field])) &&
+        asNumber(record[volumeField]) > 0,
+    );
+    const total = valid.reduce(
+      (sum, record) => sum + asNumber(record[volumeField]),
+      0,
+    );
+    if (!total) return null;
+    return round(
+      valid.reduce(
+        (sum, record) =>
+          sum + asNumber(record[field]) * asNumber(record[volumeField]),
+        0,
+      ) / total,
+      8,
+    );
+  }
+
+  function summarizeMt5DealGroup(group, inferred = false) {
+    const deals = [...group.deals].sort(
+      (left, right) => new Date(left.time) - new Date(right.time),
+    );
+    const entries = deals.filter((deal) => deal.direction === "in");
+    const exits = deals.filter(
+      (deal) => deal.direction === "out" || deal.direction === "inout",
+    );
+    if (!exits.length) return null;
+    const firstEntry = entries[0] || deals[0];
+    const lastExit = exits.at(-1);
+    const directionType =
+      firstEntry?.direction === "in"
+        ? firstEntry.type
+        : lastExit.type === "buy"
+          ? "sell"
+          : "buy";
+    const rawFinancial = deals.reduce(
+      (total, deal) => ({
+        profit: total.profit + asNumber(deal.rawFinancial.profit),
+        commission:
+          total.commission + asNumber(deal.rawFinancial.commission),
+        fee: total.fee + asNumber(deal.rawFinancial.fee),
+        swap: total.swap + asNumber(deal.rawFinancial.swap),
+      }),
+      { profit: 0, commission: 0, fee: 0, swap: 0 },
+    );
+    const comments = uniqueList(
+      deals.map((deal) => deal.comment).filter(Boolean),
+      [],
+    );
+    const closedVolume = exits.reduce(
+      (sum, deal) => sum + asNumber(deal.volume),
+      0,
+    );
+    return {
+      positionKey: group.positionKey,
+      positionId: group.positionId || "",
+      openTime: firstEntry.time,
+      closeTime: lastExit.time,
+      symbol: firstEntry.symbol || lastExit.symbol,
+      direction: directionType === "sell" ? "short" : "long",
+      size: round(closedVolume, 4),
+      entry: weightedMt5Average(entries.length ? entries : [firstEntry], "price"),
+      exit: weightedMt5Average(exits, "price"),
+      stop:
+        [...exits, ...entries].reverse().find((deal) => deal.stop)?.stop ?? null,
+      target:
+        [...exits, ...entries].reverse().find((deal) => deal.target)?.target ??
+        null,
+      comment: comments.join(" · "),
+      exitReason: mt5ExitReason(lastExit.comment),
+      rawFinancial,
+      financial: mt5FinancialParts(rawFinancial),
+      inferred,
+    };
+  }
+
+  function groupExplicitMt5Deals(deals) {
+    const groups = new Map();
+    const unlinked = [];
+    for (const deal of deals) {
+      if (!deal.positionId || deal.positionId === "0") {
+        unlinked.push(deal);
+        continue;
+      }
+      const key = `position:${deal.positionId}`;
+      if (!groups.has(key)) {
+        groups.set(key, {
+          positionKey: key,
+          positionId: deal.positionId,
+          deals: [],
+        });
+      }
+      groups.get(key).deals.push(deal);
+    }
+    return {
+      positions: [...groups.values()]
+        .map((group) => summarizeMt5DealGroup(group, false))
+        .filter(Boolean),
+      unlinked,
+    };
+  }
+
+  function groupInferredMt5Deals(deals) {
+    const openGroups = [];
+    const allGroups = [];
+    const sorted = [...deals].sort(
+      (left, right) => new Date(left.time) - new Date(right.time),
+    );
+
+    const addOpenGroup = (deal, volume = deal.volume) => {
+      const keyBase = deal.orderId || deal.dealId;
+      const sameOrder = openGroups.find(
+        (group) =>
+          group.positionKey === `inferred:${keyBase}` &&
+          group.symbol === deal.symbol &&
+          group.directionType === deal.type,
+      );
+      if (sameOrder) {
+        sameOrder.remaining += volume;
+        sameOrder.deals.push({ ...deal, volume });
+        return sameOrder;
+      }
+      const group = {
+        positionKey: `inferred:${keyBase}`,
+        positionId: "",
+        symbol: deal.symbol,
+        directionType: deal.type,
+        remaining: volume,
+        deals: [{ ...deal, volume }],
+      };
+      openGroups.push(group);
+      allGroups.push(group);
+      return group;
+    };
+
+    for (const deal of sorted) {
+      if (!deal.volume) continue;
+      if (deal.direction === "in") {
+        addOpenGroup(deal);
+        continue;
+      }
+
+      const positionType = deal.type === "buy" ? "sell" : "buy";
+      let remainingExit = deal.volume;
+      const candidates = openGroups.filter(
+        (group) =>
+          group.symbol === deal.symbol &&
+          group.directionType === positionType &&
+          group.remaining > 0,
+      );
+
+      for (const group of candidates) {
+        if (remainingExit <= 0) break;
+        const allocated = Math.min(group.remaining, remainingExit);
+        const ratio = deal.volume ? allocated / deal.volume : 0;
+        group.deals.push({
+          ...deal,
+          volume: allocated,
+          rawFinancial: {
+            profit: deal.rawFinancial.profit * ratio,
+            commission: deal.rawFinancial.commission * ratio,
+            fee: deal.rawFinancial.fee * ratio,
+            swap: deal.rawFinancial.swap * ratio,
+          },
+        });
+        group.remaining = round(group.remaining - allocated, 6);
+        remainingExit = round(remainingExit - allocated, 6);
+      }
+
+      if (remainingExit > 0) {
+        const ratio = remainingExit / deal.volume;
+        allGroups.push({
+          positionKey: `inferred-close:${deal.dealId}`,
+          positionId: "",
+          symbol: deal.symbol,
+          directionType: positionType,
+          remaining: 0,
+          deals: [
+            {
+              ...deal,
+              volume: remainingExit,
+              rawFinancial: {
+                profit: deal.rawFinancial.profit * ratio,
+                commission: deal.rawFinancial.commission * ratio,
+                fee: deal.rawFinancial.fee * ratio,
+                swap: deal.rawFinancial.swap * ratio,
+              },
+            },
+          ],
+        });
+      }
+
+      if (deal.direction === "inout" && remainingExit > 0) {
+        addOpenGroup({ ...deal, direction: "in" }, remainingExit);
+      }
+    }
+
+    return allGroups
+      .map((group) => summarizeMt5DealGroup(group, true))
+      .filter(Boolean);
+  }
+
+  function extractMt5Metadata(documentNode) {
+    const text = asciiDigits(
+      String(documentNode.documentElement?.textContent || ""),
+    )
+      .replace(/\u00a0/g, " ")
+      .replace(/[ \t]+/g, " ");
+    const oneLine = text.replace(/\s+/g, " ");
+    const match = (patterns) => {
+      for (const pattern of patterns) {
+        const result = oneLine.match(pattern);
+        if (result?.[1]) return result[1].trim();
+      }
+      return "";
+    };
+    const account = match([
+      /\baccount(?:\s*(?:number|no\.?))?\s*[:#]?\s*(\d{4,})/i,
+      /(?:الحساب|رقم الحساب)\s*[:#]?\s*(\d{4,})/i,
+    ]);
+    const currency = match([
+      /\bcurrency\s*[:#]?\s*([A-Z]{3})\b/i,
+      /(?:العملة)\s*[:#]?\s*([A-Z]{3})\b/i,
+    ]).toUpperCase();
+    const server = match([
+      /\bserver\s*[:#]?\s*([^|]{2,80}?)(?=\s{2,}|account|name|currency|$)/i,
+      /(?:الخادم|السيرفر)\s*[:#]?\s*([^|]{2,80}?)(?=\s{2,}|الحساب|الاسم|العملة|$)/i,
+    ]);
+    const broker = match([
+      /\b(?:company|broker)\s*[:#]?\s*([^|]{2,80}?)(?=\s{2,}|account|name|currency|server|$)/i,
+      /(?:الشركة|الوسيط)\s*[:#]?\s*([^|]{2,80}?)(?=\s{2,}|الحساب|الاسم|العملة|الخادم|$)/i,
+    ]);
+    const generatedAt = normalizeImportedDate(
+      match([
+        /\b(?:report date|created|date)\s*[:#]?\s*(\d{4}[./]\d{1,2}[./]\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?)/i,
+        /(?:تاريخ التقرير|تاريخ الإنشاء)\s*[:#]?\s*(\d{4}[./]\d{1,2}[./]\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?)/i,
+      ]),
+    );
+    return { account, currency, server, broker, generatedAt };
+  }
+
+  function scanMt5Report(documentNode) {
+    let section = "";
+    let activeHeader = null;
+    const positionRows = [];
+    const dealRows = [];
+
+    for (const rowNode of documentNode.querySelectorAll("tr")) {
+      const cells = mt5ExpandedCells(rowNode);
+      const nonEmpty = cells.filter(Boolean);
+      if (!nonEmpty.length) continue;
+      if (nonEmpty.length <= 2) {
+        const detectedSection = mt5SectionName(nonEmpty.join(" "));
+        if (detectedSection) {
+          section = detectedSection;
+          activeHeader = null;
+          continue;
+        }
+      }
+
+      const header = mt5HeaderInfo(cells, section);
+      if (header) {
+        activeHeader = header;
+        continue;
+      }
+      if (!activeHeader) continue;
+
+      if (activeHeader.kind === "positions") {
+        const position = parseMt5PositionRow(cells, activeHeader.fields);
+        if (position) positionRows.push(position);
+      } else if (activeHeader.kind === "deals") {
+        const deal = parseMt5DealRow(cells, activeHeader.fields);
+        if (deal) dealRows.push(deal);
+      }
+    }
+
+    return { positionRows, dealRows };
+  }
+
+  function decodeMt5ReportBuffer(buffer) {
+    if (typeof TextDecoder === "undefined") return "";
+    const bytes = new Uint8Array(buffer);
+    let encoding = "utf-8";
+    if (bytes[0] === 0xff && bytes[1] === 0xfe) encoding = "utf-16le";
+    else if (bytes[0] === 0xfe && bytes[1] === 0xff) encoding = "utf-16be";
+    else if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+      encoding = "utf-8";
+    } else {
+      const probe = new TextDecoder("windows-1252").decode(
+        bytes.slice(0, 4096),
+      );
+      const declared = probe.match(
+        /charset\s*=\s*["']?\s*([a-z0-9._-]+)/i,
+      )?.[1];
+      if (declared) {
+        const aliases = {
+          utf8: "utf-8",
+          "utf-8": "utf-8",
+          windows1252: "windows-1252",
+          "windows-1252": "windows-1252",
+          windows1256: "windows-1256",
+          "windows-1256": "windows-1256",
+          windows1251: "windows-1251",
+          "windows-1251": "windows-1251",
+          "iso-8859-1": "windows-1252",
+        };
+        encoding = aliases[declared.toLowerCase()] || declared;
+      }
+    }
+    try {
+      return new TextDecoder(encoding).decode(buffer);
+    } catch {
+      return new TextDecoder("utf-8").decode(buffer);
+    }
+  }
+
+  async function readMt5Report(file) {
+    if (asNumber(file.size) > 20_000_000) {
+      throw new Error("حجم تقرير MT5 أكبر من 20MB.");
+    }
+    if (typeof file.arrayBuffer === "function") {
+      const decoded = decodeMt5ReportBuffer(await file.arrayBuffer());
+      if (decoded) return decoded;
+    }
+    return file.text();
+  }
+
+  function mt5ExternalId(accountReference, positionKey) {
+    const account = String(accountReference || "unknown").replace(/\s+/g, "");
+    return `mt5:${account}:${positionKey}`;
+  }
+
+  function dedupeMt5ParsedTrades(trades) {
+    const unique = new Map();
+    for (const trade of trades) {
+      const current = unique.get(trade.positionKey);
+      if (
+        !current ||
+        new Date(trade.closeTime).getTime() >=
+          new Date(current.closeTime).getTime()
+      ) {
+        unique.set(trade.positionKey, trade);
+      }
+    }
+    return [...unique.values()].sort(
+      (left, right) =>
+        new Date(left.closeTime).getTime() - new Date(right.closeTime).getTime(),
+    );
+  }
+
+  async function parseMt5HtmlReport(file) {
+    const html = await readMt5Report(file);
+    if (!/<(?:html|table|tr)\b/i.test(html)) {
+      throw new Error("الملف ليس تقرير HTML صادرًا من MT5.");
+    }
+    const documentNode = new DOMParser().parseFromString(html, "text/html");
+    const metadata = extractMt5Metadata(documentNode);
+    const scanned = scanMt5Report(documentNode);
+    const warnings = [];
+    let trades = [];
+    let format = "";
+
+    if (scanned.positionRows.length) {
+      applyMt5FeeConvention(scanned.positionRows);
+      trades = scanned.positionRows;
+      format = "Positions";
+    } else if (scanned.dealRows.length) {
+      applyMt5FeeConvention(scanned.dealRows);
+      const explicit = groupExplicitMt5Deals(scanned.dealRows);
+      const inferred = groupInferredMt5Deals(explicit.unlinked);
+      trades = [...explicit.positions, ...inferred];
+      format = "Deals";
+      if (inferred.length) {
+        warnings.push(
+          "بعض الصفقات لا تحتوي رقم Position في التقرير؛ جُمعت من تسلسل الدخول والخروج ويجب مراجعة المعاينة.",
+        );
+      }
+    }
+
+    trades = dedupeMt5ParsedTrades(trades);
+    if (!trades.length) {
+      throw new Error(
+        "لم أجد صفقات مغلقة في التقرير. من MT5 اختر History ثم All History واحفظ التقرير بصيغة HTML.",
+      );
+    }
+    const accountReference = metadata.account || "unknown";
+    trades = trades.map((trade) => ({
+      ...trade,
+      externalId: mt5ExternalId(accountReference, trade.positionKey),
+    }));
+    return {
+      fileName: file.name || "MT5 report",
+      metadata,
+      format,
+      warnings,
+      trades,
+      raw: {
+        positions: scanned.positionRows.length,
+        deals: scanned.dealRows.length,
+      },
+    };
+  }
+
+  function mt5ImportedTrade(raw, accountId, existing = null) {
+    const importedNotes = raw.comment ? `تعليق MT5: ${raw.comment}` : "";
+    const preserved = existing
+      ? {
+          id: existing.id,
+          setupId: existing.setupId,
+          reason: existing.reason,
+          riskAmount: existing.riskAmount,
+          grade: existing.grade,
+          emotion: existing.emotion,
+          rulesFollowed: existing.rulesFollowed,
+          mistakes: existing.mistakes,
+          confluences: existing.confluences,
+          notes: existing.notes || importedNotes,
+          lesson: existing.lesson,
+          screenshot: existing.screenshot,
+          maeR: existing.maeR,
+          mfeR: existing.mfeR,
+          createdAt: existing.createdAt,
+        }
+      : {
+          id: uid(),
+          grade: "B",
+          emotion: "هادئ",
+          rulesFollowed: "yes",
+          notes: importedNotes,
+        };
+    return normalizeTrade(
+      {
+        ...preserved,
+        accountId,
+        date: raw.openTime,
+        closeDate: raw.closeTime,
+        symbol: raw.symbol,
+        direction: raw.direction,
+        session: state.settings.defaultSession,
+        timeframe: existing?.timeframe || "M5",
+        source: "mt5",
+        entry: raw.entry,
+        stop: raw.stop,
+        target: raw.target,
+        exit: raw.exit,
+        size: raw.size,
+        resultMode: "money",
+        grossPnl: raw.financial.grossPnl,
+        fees: raw.financial.fees,
+        swap: raw.financial.swap,
+        exitReason: raw.exitReason,
+        externalId: raw.externalId,
+        updatedAt: new Date().toISOString(),
+      },
+      state.accounts,
+    );
+  }
+
+  function mt5ExecutionSignature(trade) {
+    return [
+      trade.accountId,
+      trade.externalId,
+      trade.date,
+      trade.closeDate,
+      trade.symbol,
+      trade.direction,
+      round(trade.size, 4),
+      round(trade.entry, 8),
+      round(trade.exit, 8),
+      round(trade.grossPnl, 2),
+      round(trade.fees, 2),
+      round(trade.swap, 2),
+      round(trade.netPnl, 2),
+    ].join("|");
+  }
+
+  function mt5FallbackFingerprint(trade) {
+    return [
+      trade.accountId,
+      trade.date,
+      trade.closeDate,
+      trade.symbol,
+      trade.direction,
+      round(trade.size, 4),
+      round(trade.entry, 8),
+      round(trade.exit, 8),
+      round(trade.netPnl, 2),
+    ].join("|");
+  }
+
+  function mt5ImportCandidates(accountId, updateExisting) {
+    if (!pendingMt5Import) return [];
+    const existingExternal = new Map(
+      state.trades
+        .filter((trade) => trade.accountId === accountId && trade.externalId)
+        .map((trade) => [trade.externalId, trade]),
+    );
+    const fingerprints = new Set(
+      state.trades
+        .filter((trade) => trade.accountId === accountId)
+        .map(mt5FallbackFingerprint),
+    );
+
+    return pendingMt5Import.trades.map((raw) => {
+      const existing = existingExternal.get(raw.externalId) || null;
+      const draft = mt5ImportedTrade(raw, accountId, existing);
+      let status = "new";
+      if (existing) {
+        status =
+          mt5ExecutionSignature(existing) === mt5ExecutionSignature(draft)
+            ? "skip"
+            : updateExisting
+              ? "update"
+              : "skip";
+      } else if (fingerprints.has(mt5FallbackFingerprint(draft))) {
+        status = "skip";
+      }
+      return { raw, existing, draft, status };
+    });
+  }
+
+  function mt5DisplayTime(value) {
+    return String(value || "").replace("T", " ").slice(0, 16);
+  }
+
+  function renderMt5ImportPreview() {
+    if (!pendingMt5Import) return;
+    const accountId =
+      $("#mt5TargetAccount").value ||
+      state.settings.defaultAccountId ||
+      state.accounts[0]?.id;
+    const updateExisting = $("#mt5UpdateExisting").checked;
+    const candidates = mt5ImportCandidates(accountId, updateExisting);
+    const counts = candidates.reduce(
+      (summary, candidate) => {
+        summary[candidate.status] += 1;
+        return summary;
+      },
+      { new: 0, update: 0, skip: 0 },
+    );
+    const actionable = candidates.filter(
+      (candidate) => candidate.status !== "skip",
+    );
+    const net = actionable.reduce(
+      (sum, candidate) => sum + tradeNet(candidate.draft),
+      0,
+    );
+    const { metadata } = pendingMt5Import;
+    const metaItems = [
+      ["الحساب في MT5", metadata.account || "غير ظاهر"],
+      ["العملة", metadata.currency || "غير ظاهرة"],
+      ["نوع السجل", pendingMt5Import.format],
+      ["الصفقات المقروءة", String(pendingMt5Import.trades.length)],
+    ];
+    $("#mt5ReportMeta").innerHTML = metaItems
+      .map(
+        ([label, value]) => `
+          <div class="mt5-meta-item">
+            <span>${escapeHtml(label)}</span>
+            <b>${escapeHtml(value)}</b>
+          </div>`,
+      )
+      .join("");
+
+    const warnings = [...pendingMt5Import.warnings];
+    if (
+      metadata.currency &&
+      state.settings.currency &&
+      metadata.currency !== state.settings.currency
+    ) {
+      warnings.push(
+        `عملة التقرير ${metadata.currency} تختلف عن عملة التطبيق ${state.settings.currency}.`,
+      );
+    }
+    $("#mt5ImportWarnings").hidden = !warnings.length;
+    $("#mt5ImportWarnings").innerHTML = warnings.length
+      ? `<ul>${warnings
+          .map((warning) => `<li>${escapeHtml(warning)}</li>`)
+          .join("")}</ul>`
+      : "";
+    $("#mt5ImportSummary").innerHTML = [
+      `<span class="summary-pill">جديدة <b>${counts.new}</b></span>`,
+      `<span class="summary-pill">تحديث <b>${counts.update}</b></span>`,
+      `<span class="summary-pill">مكررة <b>${counts.skip}</b></span>`,
+      `<span class="summary-pill">الصافي <b>${escapeHtml(
+        formatMoney(net),
+      )}</b></span>`,
+    ].join("");
+
+    const statusLabel = {
+      new: ["جديدة", "new"],
+      update: ["تحديث", "update"],
+      skip: ["مكررة", "skip"],
+    };
+    $("#mt5ImportPreview").innerHTML = candidates
+      .slice(0, 150)
+      .map((candidate) => {
+        const [label, tone] = statusLabel[candidate.status];
+        const trade = candidate.draft;
+        return `
+          <tr>
+            <td><span class="mt5-import-status ${tone}">${label}</span></td>
+            <td>${escapeHtml(mt5DisplayTime(trade.date))}</td>
+            <td>${escapeHtml(mt5DisplayTime(trade.closeDate))}</td>
+            <td>${escapeHtml(trade.symbol)}</td>
+            <td>${trade.direction === "short" ? "بيع" : "شراء"}</td>
+            <td>${escapeHtml(round(trade.size, 4))}</td>
+            <td class="${resultTone(tradeNet(trade))}">${escapeHtml(
+              formatMoney(tradeNet(trade)),
+            )}</td>
+          </tr>`;
+      })
+      .join("");
+    $("#mt5ImportEmpty").hidden = candidates.length > 0;
+    $("#confirmMt5Import").disabled = actionable.length === 0;
+    $("#confirmMt5Import").textContent = actionable.length
+      ? `استيراد ${actionable.length} صفقة`
+      : "لا توجد صفقات جديدة";
+  }
+
+  function openMt5ImportPreview(report) {
+    pendingMt5Import = report;
+    $("#mt5ImportFileName").textContent = report.fileName;
+    fillSelect($("#mt5TargetAccount"), state.accounts, {
+      value: state.settings.defaultAccountId,
+      map: (account) => ({
+        value: account.id,
+        label: `${account.emoji} ${account.name}`,
+      }),
+    });
+    $("#mt5UpdateExisting").checked = true;
+    renderMt5ImportPreview();
+    $("#mt5ImportDialog").showModal();
+  }
+
+  async function commitMt5Import(event) {
+    event.preventDefault();
+    if (!pendingMt5Import) return;
+    const accountId = $("#mt5TargetAccount").value;
+    const candidates = mt5ImportCandidates(
+      accountId,
+      $("#mt5UpdateExisting").checked,
+    );
+    let imported = 0;
+    let updated = 0;
+    let skipped = 0;
+    for (const candidate of candidates) {
+      if (candidate.status === "new") {
+        state.trades.push(candidate.draft);
+        imported += 1;
+      } else if (candidate.status === "update" && candidate.existing) {
+        const index = state.trades.findIndex(
+          (trade) => trade.id === candidate.existing.id,
+        );
+        if (index >= 0) {
+          state.trades[index] = candidate.draft;
+          updated += 1;
+        }
+      } else {
+        skipped += 1;
+      }
+    }
+    await persistState();
+    render();
+    $("#mt5ImportDialog").close();
+    pendingMt5Import = null;
+    go("trades");
+    toast(
+      `تم استيراد ${imported} صفقة${
+        updated ? ` · تحديث ${updated}` : ""
+      }${skipped ? ` · تخطي ${skipped}` : ""}`,
+    );
+  }
+
   function download(name, data, type) {
     const anchor = document.createElement("a");
     const url = URL.createObjectURL(new Blob([data], { type }));
@@ -3461,6 +4565,7 @@
     $("#tradeForm").addEventListener("submit", saveTradeFromForm);
     $("#playbookForm").addEventListener("submit", savePlaybook);
     $("#accountForm").addEventListener("submit", saveAccount);
+    $("#mt5ImportForm").addEventListener("submit", commitMt5Import);
 
     $("#tradeAccount").onchange = () => {
       const account = accountById($("#tradeAccount").value);
@@ -3564,6 +4669,22 @@
       $("#analyticsTo").value = "";
       renderAnalytics();
     };
+
+    $("#mt5ReportImportBtn").onclick = () => $("#mt5ReportFile").click();
+    $("#mt5ReportFile").onchange = async (event) => {
+      try {
+        if (event.target.files[0]) {
+          toast("جارٍ قراءة تقرير MT5…");
+          const report = await parseMt5HtmlReport(event.target.files[0]);
+          openMt5ImportPreview(report);
+        }
+      } catch (error) {
+        toast(error.message || "تقرير MT5 غير صالح.", "error");
+      }
+      event.target.value = "";
+    };
+    $("#mt5TargetAccount").onchange = renderMt5ImportPreview;
+    $("#mt5UpdateExisting").onchange = renderMt5ImportPreview;
 
     $("#csvExportBtn").onclick = exportCsv;
     $("#csvImportBtn").onclick = () => $("#csvFile").click();

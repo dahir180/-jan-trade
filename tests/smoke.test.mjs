@@ -103,6 +103,36 @@ async function addTrade(window, values, copy = true) {
   await submit(window, "#tradeForm");
 }
 
+async function chooseMt5Report(window, report, name = "statement.html") {
+  const file = new window.File([report], name, { type: "text/html" });
+  file.text = async () => report;
+  const picker = window.document.querySelector("#mt5ReportFile");
+  Object.defineProperty(picker, "files", {
+    configurable: true,
+    value: [file],
+  });
+  picker.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await waitFor(
+    () => window.document.querySelector("#mt5ImportDialog").open,
+    `MT5 preview did not open: ${
+      window.document.querySelector("#toast")?.textContent || "no error"
+    }`,
+  );
+}
+
+async function confirmMt5Import(window) {
+  const form = window.document.querySelector("#mt5ImportForm");
+  const submitter = window.document.querySelector("#confirmMt5Import");
+  form.dispatchEvent(
+    new window.SubmitEvent("submit", {
+      bubbles: true,
+      cancelable: true,
+      submitter,
+    }),
+  );
+  await pause(100);
+}
+
 test("fresh boot exposes the full configurable PWA", async () => {
   const dom = await launch();
   const { document } = dom.window;
@@ -115,6 +145,7 @@ test("fresh boot exposes the full configurable PWA", async () => {
   assert.ok(document.querySelector("#accountDayResetHour"));
   assert.ok(document.querySelector("#accountConsistency"));
   assert.ok(document.querySelector("#accountMaxRiskPct"));
+  assert.ok(document.querySelector("#mt5ReportImportBtn"));
   assert.equal(document.querySelectorAll(".nav").length, 6);
   dom.window.close();
 });
@@ -509,6 +540,200 @@ test("CSV import accepts common MT5 timestamps and skips an exact re-import", as
   await pause(80);
   state = storedState(window);
   assert.equal(state.trades.length, 1);
+  dom.window.close();
+});
+
+test("original MT5 Positions HTML is previewed and imported with exact net P&L", async () => {
+  const dom = await launch();
+  const { window } = dom;
+  const report = `<!doctype html>
+    <html><head><meta charset="utf-8"><title>MT5 Statement</title></head>
+    <body><table>
+      <tr><td colspan="15">Account: 123456 Name: Trader Currency: USD</td></tr>
+      <tr><th colspan="15">Positions</th></tr>
+      <tr>
+        <th>Time</th><th>Position</th><th>Symbol</th><th>Type</th>
+        <th>Volume</th><th>Price</th><th>S/L</th><th>T/P</th>
+        <th>Time</th><th>Price</th><th>Commission</th><th>Fee</th>
+        <th>Swap</th><th>Profit</th><th>Comment</th>
+      </tr>
+      <tr>
+        <td>2026.07.31 08:30:00</td><td>7001</td><td>XAUUSD</td><td>buy</td>
+        <td>0.10</td><td>2300.00</td><td>2290.00</td><td>2320.00</td>
+        <td>2026.07.31 09:15:00</td><td>2310.00</td><td>-2.00</td><td>0</td>
+        <td>-1.00</td><td>100.00</td><td>tp 2320</td>
+      </tr>
+    </table></body></html>`;
+
+  await chooseMt5Report(window, report);
+  assert.equal(storedState(window).trades.length, 0);
+  assert.match(
+    window.document.querySelector("#mt5ImportSummary").textContent,
+    /جديدة\s*1/,
+  );
+  await confirmMt5Import(window);
+  const state = await waitFor(
+    () => storedState(window).trades.length === 1 && storedState(window),
+    "MT5 position was not imported",
+  );
+  const trade = state.trades[0];
+  assert.equal(trade.source, "mt5");
+  assert.equal(trade.date, "2026-07-31T08:30:00");
+  assert.equal(trade.closeDate, "2026-07-31T09:15:00");
+  assert.equal(trade.direction, "long");
+  assert.equal(trade.grossPnl, 100);
+  assert.equal(trade.fees, 2);
+  assert.equal(trade.swap, 1);
+  assert.equal(trade.netPnl, 97);
+  assert.equal(trade.externalId, "mt5:123456:position:7001");
+  dom.window.close();
+});
+
+test("Arabic MT5 headers, digits, and decimal separators are parsed", async () => {
+  const dom = await launch();
+  const { window } = dom;
+  const report = `<!doctype html><html lang="ar" dir="rtl"><body><table>
+    <tr><td colspan="15">رقم الحساب: ١٢٣٤٥٦ العملة: USD</td></tr>
+    <tr><th colspan="15">المراكز المغلقة</th></tr>
+    <tr>
+      <th>وقت</th><th>المركز</th><th>الرمز</th><th>النوع</th>
+      <th>الحجم</th><th>السعر</th><th>وقف الخسارة</th><th>جني الربح</th>
+      <th>وقت</th><th>السعر</th><th>العمولة</th><th>الرسوم</th>
+      <th>التبييت</th><th>الربح</th><th>تعليق</th>
+    </tr>
+    <tr>
+      <td>٢٠٢٦.٠٧.٣١ ٠٨:٣٠:٠٠</td><td>٧٠٠٢</td><td>XAUUSD</td><td>شراء</td>
+      <td>٠٫١٠</td><td>٢٣٠٠٫٠٠</td><td>٢٢٩٠٫٠٠</td><td>٢٣٢٠٫٠٠</td>
+      <td>٢٠٢٦.٠٧.٣١ ٠٩:١٥:٠٠</td><td>٢٣١٠٫٠٠</td><td>-٢٫٠٠</td><td>٠</td>
+      <td>-١٫٠٠</td><td>١٠٠٫٠٠</td><td>tp</td>
+    </tr>
+  </table></body></html>`;
+  await chooseMt5Report(window, report, "arabic-report.htm");
+  await confirmMt5Import(window);
+  const state = await waitFor(
+    () => storedState(window).trades.length === 1 && storedState(window),
+    "Arabic MT5 report was not imported",
+  );
+  assert.equal(state.trades[0].externalId, "mt5:123456:position:7002");
+  assert.equal(state.trades[0].entry, 2300);
+  assert.equal(state.trades[0].size, 0.1);
+  assert.equal(state.trades[0].netPnl, 97);
+  dom.window.close();
+});
+
+test("MT5 Deals HTML merges partial closes and updates without losing review notes", async () => {
+  const dom = await launch();
+  const { window } = dom;
+  const report = (secondClose = false) => `<!doctype html>
+    <html><head><meta charset="utf-8"></head><body><table>
+      <tr><td colspan="15">Account: 654321 Currency: USD</td></tr>
+      <tr><th colspan="15">Deals</th></tr>
+      <tr>
+        <th>Time</th><th>Deal</th><th>Position</th><th>Order</th>
+        <th>Symbol</th><th>Type</th><th>Direction</th><th>Volume</th>
+        <th>Price</th><th>S/L</th><th>T/P</th><th>Commission</th>
+        <th>Fee</th><th>Swap</th><th>Profit</th><th>Comment</th>
+      </tr>
+      <tr>
+        <td>2026.07.31 08:00:00</td><td>1001</td><td>777</td><td>9001</td>
+        <td>XAUUSD</td><td>buy</td><td>in</td><td>0.20</td><td>2300</td>
+        <td>2290</td><td>2360</td><td>-1.00</td><td>0</td><td>0</td><td>0</td><td></td>
+      </tr>
+      <tr>
+        <td>2026.07.31 09:00:00</td><td>1002</td><td>777</td><td>9002</td>
+        <td>XAUUSD</td><td>sell</td><td>out</td><td>0.10</td><td>2350</td>
+        <td>2290</td><td>2360</td><td>-0.50</td><td>0</td><td>0</td><td>50</td><td>partial</td>
+      </tr>
+      ${
+        secondClose
+          ? `<tr>
+        <td>2026.07.31 09:30:00</td><td>1003</td><td>777</td><td>9003</td>
+        <td>XAUUSD</td><td>sell</td><td>out</td><td>0.10</td><td>2360</td>
+        <td>2290</td><td>2360</td><td>-0.50</td><td>0</td><td>-1.00</td><td>70</td><td>tp</td>
+      </tr>`
+          : ""
+      }
+    </table></body></html>`;
+
+  await chooseMt5Report(window, report(false), "partial.html");
+  await confirmMt5Import(window);
+  await waitFor(
+    () => storedState(window).trades.length === 1,
+    "First partial close was not imported",
+  );
+  let state = storedState(window);
+  assert.equal(state.trades[0].size, 0.1);
+  assert.equal(state.trades[0].netPnl, 48.5);
+
+  window.document.querySelector(".edit-trade").click();
+  input(window, "#notes", "مراجعتي الخاصة لا تُحذف");
+  await submit(window, "#tradeForm");
+
+  await chooseMt5Report(window, report(true), "complete.html");
+  assert.match(
+    window.document.querySelector("#mt5ImportSummary").textContent,
+    /تحديث\s*1/,
+  );
+  await confirmMt5Import(window);
+  state = await waitFor(
+    () => storedState(window).trades[0]?.netPnl === 117 && storedState(window),
+    "Partial-close update was not applied",
+  );
+  assert.equal(state.trades.length, 1);
+  assert.equal(state.trades[0].size, 0.2);
+  assert.equal(state.trades[0].entry, 2300);
+  assert.equal(state.trades[0].exit, 2355);
+  assert.equal(state.trades[0].grossPnl, 120);
+  assert.equal(state.trades[0].fees, 2);
+  assert.equal(state.trades[0].swap, 1);
+  assert.equal(state.trades[0].notes, "مراجعتي الخاصة لا تُحذف");
+
+  await chooseMt5Report(window, report(true), "duplicate.html");
+  assert.equal(
+    window.document.querySelector("#confirmMt5Import").disabled,
+    true,
+  );
+  assert.match(
+    window.document.querySelector("#mt5ImportSummary").textContent,
+    /مكررة\s*1/,
+  );
+  dom.window.close();
+});
+
+test("MT5 deal reports without Position IDs use a visible conservative fallback", async () => {
+  const dom = await launch();
+  const { window } = dom;
+  const report = `<!doctype html><html><body><table>
+    <tr><td colspan="13">Account: 998877 Currency: USD</td></tr>
+    <tr><th colspan="13">Deals</th></tr>
+    <tr>
+      <th>Time</th><th>Deal</th><th>Order</th><th>Symbol</th>
+      <th>Type</th><th>Direction</th><th>Volume</th><th>Price</th>
+      <th>Commission</th><th>Fee</th><th>Swap</th><th>Profit</th><th>Comment</th>
+    </tr>
+    <tr>
+      <td>2026.07.31 10:00:00</td><td>501</td><td>401</td><td>GBPUSD</td>
+      <td>sell</td><td>in</td><td>0.10</td><td>1.3200</td>
+      <td>-0.50</td><td>0</td><td>0</td><td>0</td><td></td>
+    </tr>
+    <tr>
+      <td>2026.07.31 10:20:00</td><td>502</td><td>402</td><td>GBPUSD</td>
+      <td>buy</td><td>out</td><td>0.10</td><td>1.3180</td>
+      <td>-0.50</td><td>0</td><td>0</td><td>20</td><td>manual</td>
+    </tr>
+  </table></body></html>`;
+  await chooseMt5Report(window, report, "deals-no-position.htm");
+  assert.match(
+    window.document.querySelector("#mt5ImportWarnings").textContent,
+    /لا تحتوي رقم Position/,
+  );
+  await confirmMt5Import(window);
+  const state = await waitFor(
+    () => storedState(window).trades.length === 1 && storedState(window),
+    "Fallback deal was not imported",
+  );
+  assert.equal(state.trades[0].direction, "short");
+  assert.equal(state.trades[0].netPnl, 19);
   dom.window.close();
 });
 

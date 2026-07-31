@@ -182,6 +182,9 @@
             <input id="dateFromFilter" type="date" aria-label="من تاريخ" />
             <input id="dateToFilter" type="date" aria-label="إلى تاريخ" />
             <button class="btn" id="clearTradeFilters">مسح الفلاتر</button>
+            <button class="btn primary" id="mt5ReportImportBtn">
+              استيراد تقرير MT5
+            </button>
             <button class="btn" id="csvImportBtn">استيراد CSV</button>
             <button class="btn" id="csvExportBtn">تصدير CSV</button>
           </div>
@@ -931,6 +934,82 @@
       </form>
     </dialog>
 
+    <dialog id="mt5ImportDialog" class="mt5-import-dialog">
+      <form method="dialog" id="mt5ImportForm">
+        <div class="modal-head sticky-head">
+          <div>
+            <h2>معاينة تقرير MT5</h2>
+            <small id="mt5ImportFileName"
+              >تحقق من الحساب والصفقات قبل إضافتها.</small
+            >
+          </div>
+          <button type="button" class="close" data-close="mt5ImportDialog">
+            ×
+          </button>
+        </div>
+
+        <div class="mt5-import-body">
+          <div class="mt5-report-meta" id="mt5ReportMeta"></div>
+
+          <div class="mt5-import-options">
+            <label
+              >إضافة الصفقات إلى الحساب
+              <select id="mt5TargetAccount" required></select>
+            </label>
+            <label class="check-line">
+              <input id="mt5UpdateExisting" type="checkbox" checked />
+              تحديث الصفقة إذا وجدت إغلاقات جزئية جديدة
+            </label>
+          </div>
+
+          <div
+            id="mt5ImportWarnings"
+            class="mt5-import-warnings"
+            hidden
+          ></div>
+          <div class="trade-summary" id="mt5ImportSummary"></div>
+
+          <div class="mt5-preview-wrap">
+            <table aria-label="معاينة صفقات تقرير MT5">
+              <thead>
+                <tr>
+                  <th>الحالة</th>
+                  <th>الفتح</th>
+                  <th>الإغلاق</th>
+                  <th>الأصل</th>
+                  <th>الاتجاه</th>
+                  <th>الحجم</th>
+                  <th>الصافي</th>
+                </tr>
+              </thead>
+              <tbody id="mt5ImportPreview"></tbody>
+            </table>
+          </div>
+          <div class="empty" id="mt5ImportEmpty" hidden>
+            لا توجد صفقات مغلقة قابلة للاستيراد.
+          </div>
+
+          <p class="mt5-import-note">
+            تتم قراءة الملف داخل جهازك فقط ولا يتم رفعه إلى أي خادم. أوقات
+            الصفقات تبقى بحسب توقيت خادم شركة التداول.
+          </p>
+        </div>
+
+        <div class="modal-foot sticky-foot">
+          <button type="button" class="btn" data-close="mt5ImportDialog">
+            إلغاء
+          </button>
+          <button
+            class="btn primary"
+            id="confirmMt5Import"
+            value="import"
+          >
+            استيراد الصفقات
+          </button>
+        </div>
+      </form>
+    </dialog>
+
     <dialog id="dayDialog">
       <div class="modal-head">
         <div>
@@ -942,6 +1021,12 @@
       <div id="dayDialogContent" class="day-dialog-content"></div>
     </dialog>
 
+    <input
+      hidden
+      type="file"
+      id="mt5ReportFile"
+      accept=".html,.htm,text/html"
+    />
     <input hidden type="file" id="csvFile" accept=".csv,text/csv" />
     <input
       hidden
